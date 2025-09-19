@@ -10,7 +10,7 @@ from rest_framework import viewsets
 from .models import Conversation, Message
 from .serializers import ConversationSerializer, MessageSerializer
 
-_api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY') or 'AIzaSyCrxhZApl_hhBb66cFkzkTgSu9xO-v8uFU'
+_api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY') 
 genai.configure(api_key=_api_key)
 
 @csrf_exempt
