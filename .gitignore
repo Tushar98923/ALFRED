@@ -1,0 +1,42 @@
+.env
+.venv/
+myenv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Django/DB
+**/db.sqlite3
+media/
+staticfiles/
+
+# Node/Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# OS/Editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Build artifacts
+coverage/
+dist/
+build/
+
+# Misc
+*.local
+.env.*.local
+
+# Python
+
