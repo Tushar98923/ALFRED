@@ -19,6 +19,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'apps.assistant',
+    'apps.knowledge',
 ]
 
 MIDDLEWARE = [
@@ -65,6 +66,14 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = 'static/'
+
+# Media files (uploaded documents)
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# RAG pipeline configuration
+RAG_CHROMA_PATH = str(BASE_DIR / 'chroma_data')
+RAG_COLLECTION_NAME = 'alfred_knowledge'
 
 CORS_ALLOWED_ORIGINS = [origin for origin in os.getenv('ALLOWED_ORIGINS', '').split(',') if origin]
 CORS_ALLOW_CREDENTIALS = True

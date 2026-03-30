@@ -1,50 +1,58 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { getSpeechRecognition } from './voice'
-import { listConversations, getConversation, createConversation, type Conversation, type Message } from '../api/client'
+import {
+  listConversations, getConversation, createConversation, deleteConversation,
+  listDocuments, uploadDocument, deleteDocument, getKnowledgeStats,
+  listProviders, getProviderChoices, saveProvider, activateProvider, deleteProvider,
+  postCommand,
+  type Conversation, type Message, type KnowledgeDocument,
+  type RAGSource, type AssistantResponse, type LLMProvider, type ProviderChoice,
+} from '../api/client'
 
-async function postCommand(text: string, conversation_id?: number): Promise<{ command?: string; error?: string; conversation_id?: number }> {
-  const res = await fetch('/api/command/', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, conversation_id })
-  })
-  return res.json()
-}
 
 export default function App() {
   const [text, setText] = useState('')
-  const [command, setCommand] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [history, setHistory] = useState<{ text: string; command?: string }[]>([])
   const [listening, setListening] = useState(false)
-  const [dark, setDark] = useState(true)
+
   const [conversationId, setConversationId] = useState<number | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [messages, setMessages] = useState<Message[]>([])
+  const [lastResponse, setLastResponse] = useState<AssistantResponse | null>(null)
+
+  const [documents, setDocuments] = useState<KnowledgeDocument[]>([])
+  const [sidebarTab, setSidebarTab] = useState<'chats' | 'knowledge' | 'settings'>('chats')
+  const [uploading, setUploading] = useState(false)
+  const [kbChunks, setKbChunks] = useState(0)
+
+  const [providers, setProviders] = useState<LLMProvider[]>([])
+  const [providerChoices, setProviderChoices] = useState<ProviderChoice[]>([])
+  const [showSettings, setShowSettings] = useState(false)
+
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const recognitionRef = useRef<SpeechRecognition | null>(null)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const canSend = useMemo(() => text.trim().length > 0 && !loading, [text, loading])
 
-  const handleSend = async () => {
-    if (!canSend) return
-    setLoading(true)
-    setError('')
-    setCommand('')
-    try {
-      const result = await postCommand(text.trim(), conversationId ?? undefined)
-      if (result.error) setError(result.error)
-      if (result.command) {
-        setCommand(result.command)
-        setHistory((h) => [{ text, command: result.command }, ...h].slice(0, 20))
-        if (typeof result.conversation_id === 'number') setConversationId(result.conversation_id)
-      }
-    } catch (e: any) {
-      setError(e?.message || 'Request failed')
-    } finally {
-      setLoading(false)
-    }
-  }
+  // ── Init ────────────────────────────────────────────────────
+
+  useEffect(() => {
+    listConversations().then(setConversations).catch(() => {})
+    loadDocuments()
+    getKnowledgeStats().then(s => setKbChunks(s.total_chunks)).catch(() => {})
+    loadProviders()
+  }, [])
+
+  useEffect(() => {
+    if (!conversationId) { setMessages([]); return }
+    getConversation(conversationId).then(c => setMessages(c.messages || [])).catch(() => {})
+  }, [conversationId])
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, lastResponse])
 
   useEffect(() => {
     const rec = getSpeechRecognition()
@@ -53,258 +61,494 @@ export default function App() {
     rec.continuous = false
     rec.interimResults = false
     rec.onresult = (evt: any) => {
-      const transcript = Array.from(evt.results)
-        .map((r: any) => r[0]?.transcript)
-        .join(' ')
-      setText((prev) => (prev ? prev + ' ' : '') + transcript)
+      const t = Array.from(evt.results).map((r: any) => r[0]?.transcript).join(' ')
+      setText((p: string) => (p ? p + ' ' : '') + t)
       setListening(false)
     }
     rec.onend = () => setListening(false)
     rec.onerror = () => setListening(false)
   }, [])
 
-  useEffect(() => {
-    // load conversations on mount
-    listConversations().then(setConversations).catch(() => {})
-  }, [])
+  // ── Helpers ─────────────────────────────────────────────────
 
-  useEffect(() => {
-    if (!conversationId) return
-    getConversation(conversationId).then((c) => setMessages(c.messages || [])).catch(() => {})
-  }, [conversationId])
+  const loadDocuments = () => {
+    listDocuments().then(setDocuments).catch(() => {})
+  }
+
+  const loadProviders = () => {
+    listProviders().then(setProviders).catch(() => {})
+    getProviderChoices().then(setProviderChoices).catch(() => {})
+  }
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploading(true)
+    try {
+      await uploadDocument(file)
+      loadDocuments()
+      getKnowledgeStats().then(s => setKbChunks(s.total_chunks)).catch(() => {})
+    } catch (err: any) {
+      setError(err?.message || 'Upload failed')
+    } finally {
+      setUploading(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  const handleDeleteDoc = async (id: number) => {
+    await deleteDocument(id).catch(() => {})
+    loadDocuments()
+    getKnowledgeStats().then(s => setKbChunks(s.total_chunks)).catch(() => {})
+  }
+
+  const handleDeleteConv = async (id: number) => {
+    await deleteConversation(id).catch(() => {})
+    if (conversationId === id) { setConversationId(null); setMessages([]); setLastResponse(null) }
+    listConversations().then(setConversations).catch(() => {})
+  }
 
   const toggleVoice = () => {
     const rec = recognitionRef.current
     if (!rec) return
-    if (listening) {
-      rec.stop()
-      setListening(false)
-    } else {
-      setListening(true)
-      rec.start()
+    if (listening) { rec.stop(); setListening(false) }
+    else { setListening(true); rec.start() }
+  }
+
+  // ── Send ────────────────────────────────────────────────────
+
+  const handleSend = async () => {
+    if (!canSend) return
+    const userText = text.trim()
+    setText('')
+    setError('')
+    setLastResponse(null)
+
+    // Optimistic: immediately show the user message
+    const tempUserMsg: Message = {
+      id: Date.now(),
+      conversation: conversationId ?? 0,
+      role: 'user',
+      content: userText,
+      created_at: new Date().toISOString(),
+    }
+    setMessages((prev: Message[]) => [...prev, tempUserMsg])
+    setLoading(true)
+
+    try {
+      const result = await postCommand(userText, conversationId ?? undefined)
+      setLastResponse(result)
+
+      if ('error' in result && result.error && !('mode' in result)) {
+        setError(result.error as string)
+      } else if ('conversation_id' in result) {
+        const cid = (result as any).conversation_id as number
+        setConversationId(cid)
+
+        // Optimistic sidebar: add new conversation or move existing to top
+        setConversations((prev: Conversation[]) => {
+          const exists = prev.some((c: Conversation) => c.id === cid)
+          if (!exists) {
+            // New conversation — add to top immediately
+            return [{
+              id: cid,
+              title: userText.slice(0, 40),
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            }, ...prev]
+          }
+          // Existing conversation — move to top
+          const conv = prev.find((c: Conversation) => c.id === cid)!
+          return [{ ...conv, updated_at: new Date().toISOString() }, ...prev.filter((c: Conversation) => c.id !== cid)]
+        })
+
+        // Optimistic: immediately show the assistant message
+        const assistantContent =
+          result.mode === 'knowledge' && 'answer' in result ? (result as any).answer :
+          result.mode === 'command' && 'command' in result ? (result as any).command : ''
+
+        if (assistantContent) {
+          const tempAssistantMsg: Message = {
+            id: Date.now() + 1,
+            conversation: cid,
+            role: 'assistant',
+            content: assistantContent,
+            created_at: new Date().toISOString(),
+          }
+          setMessages((prev: Message[]) => [...prev, tempAssistantMsg])
+        }
+      }
+    } catch (e: any) {
+      setError(e?.message || 'Request failed')
+    } finally {
+      setLoading(false)
     }
   }
 
-  const bg = dark ? '#0b0f17' : '#f3f4f6'
-  const panel = dark ? '#0f172a' : '#ffffff'
-  const textColor = dark ? '#e5e7eb' : '#111827'
-  const subText = dark ? '#9aa2b1' : '#6b7280'
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
+  }
+
+  const formatTime = (iso: string) => {
+    const d = new Date(iso)
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  }
+
+  // ── Render ──────────────────────────────────────────────────
 
   return (
-    <div style={{
-      minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
-      background: bg, color: textColor, padding: 24
-    }}>
-      <div style={{ width: 720, maxWidth: '100%', background: panel, borderRadius: 12, padding: 20, border: '1px solid #1f2937' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <h1 style={{ margin: 0, fontSize: 24 }}>ALFRED</h1>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span style={{ fontSize: 12, color: subText }}>{loading ? 'Contacting model…' : 'Idle'}</span>
-            <button onClick={() => setDark((d) => !d)} style={{
-              background: dark ? '#f3f4f6' : '#111827',
-              color: dark ? '#111827' : '#f3f4f6',
-              border: 'none', borderRadius: 8, padding: '6px 10px', cursor: 'pointer', fontWeight: 600
-            }}>{dark ? 'Light' : 'Dark'}</button>
-          </div>
+    <div className="app">
+      <div className="geo-dot-grid" />
+
+      {/* ━━ Sidebar ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      <aside className="sidebar">
+        <div className="sidebar-tabs">
+          {(['chats', 'knowledge', 'settings'] as const).map(tab => (
+            <button
+              key={tab}
+              className={`sidebar-tab ${sidebarTab === tab ? 'active' : ''}`}
+              onClick={() => setSidebarTab(tab)}
+            >
+              {tab}
+            </button>
+          ))}
         </div>
-        <p style={{ marginTop: 8, color: subText }}>Type a task or use voice. Review and run safely.</p>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 12, marginTop: 16 }}>
-          <aside style={{ background: '#0b1220', border: '1px solid #1f2937', borderRadius: 8, padding: 10 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <div style={{ fontWeight: 700 }}>Conversations</div>
-              <button onClick={async () => {
-                const title = text.trim() ? text.trim().slice(0, 40) : 'New chat'
-                try {
-                  const c = await createConversation(title)
-                  setConversations((cs) => [c, ...cs])
-                  setConversationId(c.id)
-                  setMessages([])
-                } catch {}
-              }} style={{ background: '#22c55e', color: 'black', border: 'none', borderRadius: 6, padding: '6px 8px', cursor: 'pointer', fontWeight: 600 }}>New</button>
-            </div>
-            <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 6, maxHeight: 420, overflow: 'auto' }}>
-              {conversations.map((c) => (
-                <li key={c.id}>
-                  <button onClick={() => setConversationId(c.id)} style={{
-                    width: '100%', textAlign: 'left', background: conversationId === c.id ? '#1f2937' : 'transparent',
-                    color: textColor, border: '1px solid #1f2937', borderRadius: 6, padding: '8px 10px', cursor: 'pointer'
-                  }}>{c.title || `Conversation ${c.id}`}</button>
-                </li>
-              ))}
-            </ul>
-          </aside>
+        <div className="sidebar-content">
+          {sidebarTab === 'chats' && (
+            <>
+              <div className="sidebar-header">
+                <span className="sidebar-title">Conversations</span>
+                <button className="btn btn-sm" onClick={async () => {
+                  try {
+                    const c = await createConversation('New conversation')
+                    setConversations((cs: Conversation[]) => [c, ...cs])
+                    setConversationId(c.id)
+                    setMessages([])
+                    setLastResponse(null)
+                  } catch {}
+                }}>+ New</button>
+              </div>
+              <ul className="conv-list">
+                {conversations.map(c => (
+                  <li key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <button
+                      className={`conv-item ${conversationId === c.id ? 'active' : ''}`}
+                      onClick={() => { setConversationId(c.id); setLastResponse(null) }}
+                    >
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {c.title || `#${c.id}`}
+                      </span>
+                      <span className="conv-meta">{formatTime(c.updated_at)}</span>
+                    </button>
+                    <button
+                      className="btn-danger btn-sm"
+                      onClick={() => handleDeleteConv(c.id)}
+                      title="Delete"
+                      style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 11, color: '#ccc', padding: 4 }}
+                    >×</button>
+                  </li>
+                ))}
+                {conversations.length === 0 && (
+                  <li className="empty-state">No conversations yet</li>
+                )}
+              </ul>
+            </>
+          )}
 
-          <section>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="e.g., create a folder named Reports on Desktop"
-                style={{
-                  flex: 1,
-                  background: '#0b1220',
-                  border: '1px solid #1f2937',
-                  color: 'white',
-                  borderRadius: 8,
-                  padding: '10px 12px'
-                }}
-              />
-              <button onClick={toggleVoice} disabled={!getSpeechRecognition()} style={{
-                background: '#60a5fa',
-                color: 'black',
-                border: 'none',
-                borderRadius: 8,
-                padding: '10px 12px',
-                cursor: getSpeechRecognition() ? 'pointer' : 'not-allowed',
-                fontWeight: 600
-              }}>{listening ? 'Listening…' : 'Voice'}</button>
-
-              <button onClick={handleSend} disabled={!canSend} style={{
-                background: canSend ? '#22c55e' : '#374151',
-                color: 'black',
-                border: 'none',
-                borderRadius: 8,
-                padding: '10px 14px',
-                cursor: canSend ? 'pointer' : 'not-allowed',
-                fontWeight: 600
-              }}>Send</button>
-            </div>
-
-            <div style={{ marginTop: 12 }}>
-              {messages.map((m) => (
-                <div key={m.id} style={{
-                  background: m.role === 'user' ? '#0b1220' : 'transparent',
-                  border: '1px solid #1f2937', borderRadius: 8, padding: 10, marginBottom: 8
-                }}>
-                  <div style={{ fontSize: 12, color: subText, marginBottom: 4 }}>{m.role.toUpperCase()}</div>
-                  <div>{m.content}</div>
+          {sidebarTab === 'knowledge' && (
+            <>
+              <div className="sidebar-header">
+                <span className="sidebar-title">Documents</span>
+                <button className="btn btn-sm" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+                  {uploading ? '...' : '+ Upload'}
+                </button>
+                <input ref={fileInputRef} type="file" accept=".txt,.md,.pdf,.docx,.csv"
+                  onChange={handleUpload} style={{ display: 'none' }} />
+              </div>
+              <div className="kb-stats">
+                {documents.filter(d => d.status === 'ready').length} docs · {kbChunks} chunks
+              </div>
+              {documents.map(doc => (
+                <div key={doc.id} className="doc-item">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="doc-name">{doc.title}</div>
+                      <div className="doc-meta">
+                        .{doc.file_type} · {(doc.file_size / 1024).toFixed(0)}kb
+                        {doc.status === 'ready' && ` · ${doc.chunk_count} chunks`}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span className="doc-status" style={{
+                        background: doc.status === 'ready' ? 'var(--success)' :
+                          doc.status === 'error' ? 'var(--error)' :
+                          doc.status === 'processing' ? 'var(--warning)' : 'var(--text-tertiary)'
+                      }} />
+                      <button className="btn-danger btn-sm" onClick={() => handleDeleteDoc(doc.id)}
+                        style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 12, padding: 2 }}>×</button>
+                    </div>
+                  </div>
+                  {doc.status === 'error' && doc.error_message && (
+                    <div style={{ fontSize: 10, color: 'var(--error)', marginTop: 4 }}>{doc.error_message}</div>
+                  )}
                 </div>
               ))}
-              {command && (
-                <div style={{ marginTop: 8 }}>
-                  <div style={{ fontSize: 12, color: subText }}>Suggested PowerShell command</div>
-                  <pre style={{
-                    marginTop: 6,
-                    background: '#0b1220',
-                    border: '1px solid #1f2937',
-                    color: '#e5e7eb',
-                    padding: 12,
-                    borderRadius: 8,
-                    whiteSpace: 'pre-wrap'
-                  }}>{command}</pre>
-                  <Execute command={command} />
+              {documents.length === 0 && (
+                <div className="empty-state">
+                  Upload .txt, .md, .pdf, .docx,<br/>or .csv to build your knowledge base.
+                </div>
+              )}
+            </>
+          )}
+
+          {sidebarTab === 'settings' && (
+            <>
+              <div className="sidebar-header">
+                <span className="sidebar-title">LLM Providers</span>
+              </div>
+              <ProviderManager
+                providers={providers}
+                choices={providerChoices}
+                onRefresh={loadProviders}
+              />
+            </>
+          )}
+        </div>
+      </aside>
+
+      {/* ━━ Main ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      <main className="main">
+        <header className="header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span className="logo">Alfred</span>
+            {loading && (
+              <span className="loading-dots">
+                <span>·</span><span>·</span><span>·</span>
+              </span>
+            )}
+          </div>
+          <div className="header-right">
+            {kbChunks > 0 && <span className="badge badge-knowledge">{kbChunks} chunks</span>}
+            <span className="badge">auto-route</span>
+            <button className="btn btn-ghost" onClick={toggleVoice} disabled={!getSpeechRecognition()}>
+              {listening ? '■ stop' : '● voice'}
+            </button>
+          </div>
+        </header>
+
+        {/* Messages */}
+        <div className="messages">
+          {messages.length === 0 && !lastResponse && (
+            <div className="welcome">
+              <div className="welcome-grid" />
+              <h2>Alfred</h2>
+              <p>
+                Ask a question about your documents or give a system command.
+                Intent is detected automatically.
+              </p>
+              {kbChunks === 0 && (
+                <div className="welcome-hint">
+                  Upload documents in the knowledge tab to enable RAG.
                 </div>
               )}
             </div>
-          </section>
+          )}
+
+          {messages.map(m => (
+            <div key={m.id} className={`message message-${m.role}`}>
+              <div className="message-role">{m.role}</div>
+              <div className="message-content">{m.content}</div>
+              <div className="message-time">{formatTime(m.created_at)}</div>
+            </div>
+          ))}
+
+          {loading && (
+            <div className="message message-assistant">
+              <div className="message-role">assistant</div>
+              <div className="message-content">
+                <span className="loading-dots"><span>·</span><span>·</span><span>·</span></span>
+              </div>
+            </div>
+          )}
+
+          {lastResponse && 'mode' in lastResponse && (
+            <div style={{ maxWidth: 640 }}>
+              {lastResponse.mode === 'knowledge' && 'sources' in lastResponse && lastResponse.sources.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <span className="badge badge-knowledge" style={{ marginBottom: 6, display: 'inline-block' }}>knowledge</span>
+                  <div className="sources">
+                    {lastResponse.sources.map((s: RAGSource, i: number) => (
+                      <span key={i} className="source-tag">
+                        {s.name} · {(s.score * 100).toFixed(0)}%
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {lastResponse.mode === 'command' && 'command' in lastResponse && (
+                <div style={{ marginTop: 8 }}>
+                  <span className="badge badge-command" style={{ marginBottom: 6, display: 'inline-block' }}>command</span>
+                  <div className="command-block">{lastResponse.command}</div>
+                  <Execute command={lastResponse.command} />
+                </div>
+              )}
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
         </div>
 
-        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="e.g., create a folder named Reports on Desktop"
-            style={{
-              flex: 1,
-              background: '#0b1220',
-              border: '1px solid #1f2937',
-              color: 'white',
-              borderRadius: 8,
-              padding: '10px 12px'
-            }}
-          />
-          <button onClick={toggleVoice} disabled={!getSpeechRecognition()} style={{
-            background: '#60a5fa',
-            color: 'black',
-            border: 'none',
-            borderRadius: 8,
-            padding: '10px 12px',
-            cursor: getSpeechRecognition() ? 'pointer' : 'not-allowed',
-            fontWeight: 600
-          }}>{listening ? 'Listening…' : 'Voice'}</button>
+        {error && <div className="error-bar">{error}</div>}
 
-          <button onClick={handleSend} disabled={!canSend} style={{
-            background: canSend ? '#22c55e' : '#374151',
-            color: 'black',
-            border: 'none',
-            borderRadius: 8,
-            padding: '10px 14px',
-            cursor: canSend ? 'pointer' : 'not-allowed',
-            fontWeight: 600
-          }}>Send</button>
+        {/* Input */}
+        <div className="input-bar">
+          <div className="input-row">
+            <input
+              className="input-field"
+              value={text}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setText(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask a question or give a command..."
+            />
+            <button className="btn btn-primary" onClick={handleSend} disabled={!canSend}>
+              Send
+            </button>
+          </div>
         </div>
-
-        {loading && <p style={{ marginTop: 12 }}>Thinking…</p>}
-        {error && <p style={{ marginTop: 12, color: '#fca5a5' }}>{error}</p>}
-        {command && (
-          <div style={{ marginTop: 16 }}>
-            <div style={{ fontSize: 12, color: '#9aa2b1' }}>Suggested PowerShell command</div>
-            <pre style={{
-              marginTop: 6,
-              background: '#0b1220',
-              border: '1px solid #1f2937',
-              color: '#e5e7eb',
-              padding: 12,
-              borderRadius: 8,
-              whiteSpace: 'pre-wrap'
-            }}>{command}</pre>
-            <Execute command={command} />
-          </div>
-        )}
-
-        {history.length > 0 && (
-          <div style={{ marginTop: 24 }}>
-            <div style={{ fontSize: 12, color: '#9aa2b1', marginBottom: 6 }}>Recent</div>
-            <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-              {history.map((h, idx) => (
-                <li key={idx} style={{ background: '#0b1220', border: '1px solid #1f2937', borderRadius: 8, padding: 10 }}>
-                  <div style={{ fontWeight: 600 }}>{h.text}</div>
-                  {h.command && <div style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', color: '#9aa2b1', marginTop: 4 }}>{h.command}</div>}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
+      </main>
     </div>
   )
 }
 
-function Execute({ command }: { command: string }) {
-  const [running, setRunning] = useState(false)
-  const [output, setOutput] = useState<{ stdout?: string; stderr?: string; error?: string } | null>(null)
 
-  const run = async () => {
-    setRunning(true)
-    setOutput(null)
+// ─── Provider Manager ───────────────────────────────────────────
+
+function ProviderManager({ providers, choices, onRefresh }: {
+  providers: LLMProvider[]
+  choices: ProviderChoice[]
+  onRefresh: () => void
+}) {
+  const [adding, setAdding] = useState(false)
+  const [form, setForm] = useState({ provider: '', api_key: '', base_url: '', model_name: '' })
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    if (!form.provider) return
+    setSaving(true)
     try {
-      const res = await fetch('/api/execute/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command })
-      })
-      const data = await res.json()
-      setOutput(data)
-    } catch (e: any) {
-      setOutput({ error: e?.message || 'Failed' })
-    } finally {
-      setRunning(false)
-    }
+      await saveProvider(form)
+      onRefresh()
+      setAdding(false)
+      setForm({ provider: '', api_key: '', base_url: '', model_name: '' })
+    } catch {}
+    setSaving(false)
+  }
+
+  const handleActivate = async (id: number) => {
+    await activateProvider(id).catch(() => {})
+    onRefresh()
+  }
+
+  const handleDelete = async (id: number) => {
+    await deleteProvider(id).catch(() => {})
+    onRefresh()
   }
 
   return (
-    <div style={{ marginTop: 10 }}>
-      <button onClick={run} disabled={running} style={{
-        background: '#fbbf24', color: 'black', border: 'none', borderRadius: 8, padding: '8px 12px', cursor: running ? 'not-allowed' : 'pointer', fontWeight: 600
-      }}>Run Safely</button>
-      {output && (
-        <pre style={{ marginTop: 8, background: '#0b1220', border: '1px solid #1f2937', color: '#e5e7eb', padding: 10, borderRadius: 8, whiteSpace: 'pre-wrap' }}>
-{JSON.stringify(output, null, 2)}
-        </pre>
+    <div>
+      {providers.map(p => (
+        <div key={p.id} className={`provider-card ${p.is_active ? 'active' : ''}`}>
+          <div className="provider-name">
+            <span>{p.provider_display}</span>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {!p.is_active && p.is_configured && (
+                <button className="btn btn-sm" onClick={() => handleActivate(p.id)}>Activate</button>
+              )}
+              {p.is_active && <span className="badge" style={{ borderColor: 'var(--success)', color: 'var(--success)' }}>active</span>}
+              <button className="btn btn-sm" onClick={() => handleDelete(p.id)}
+                style={{ color: 'var(--error)', borderColor: 'transparent' }}>×</button>
+            </div>
+          </div>
+          <div className="provider-status">
+            {p.masked_key ? `Key: ${p.masked_key}` : 'No key set'}
+            {p.base_url && ` · ${p.base_url}`}
+            {p.model_name && ` · ${p.model_name}`}
+          </div>
+        </div>
+      ))}
+
+      {adding ? (
+        <div className="provider-card">
+          <select className="provider-input" value={form.provider}
+            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setForm({ ...form, provider: e.target.value })}>
+            <option value="">Select provider...</option>
+            {choices.map(c => (
+              <option key={c.value} value={c.value}>{c.label}</option>
+            ))}
+          </select>
+          <input className="provider-input" placeholder="API Key"
+            type="password" value={form.api_key}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, api_key: e.target.value })} />
+          <input className="provider-input" placeholder="Base URL (optional)"
+            value={form.base_url}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, base_url: e.target.value })} />
+          <input className="provider-input" placeholder="Model name (optional)"
+            value={form.model_name}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, model_name: e.target.value })} />
+          <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+            <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving || !form.provider}>
+              {saving ? '...' : 'Save'}
+            </button>
+            <button className="btn btn-sm" onClick={() => setAdding(false)}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button className="btn" style={{ width: '100%', marginTop: 8 }} onClick={() => setAdding(true)}>
+          + Add Provider
+        </button>
+      )}
+
+      {providers.length === 0 && !adding && (
+        <div className="empty-state">
+          Add an LLM provider to get started.<br/>
+          Supports Gemini, OpenAI, Anthropic, and more.
+        </div>
       )}
     </div>
   )
 }
 
 
+// ─── Execute ────────────────────────────────────────────────────
+
+function Execute({ command }: { command: string }) {
+  const [running, setRunning] = useState(false)
+  const [output, setOutput] = useState<{ stdout?: string; stderr?: string; error?: string } | null>(null)
+
+  const run = async () => {
+    setRunning(true); setOutput(null)
+    try {
+      const res = await fetch('/api/execute/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command })
+      })
+      setOutput(await res.json())
+    } catch (e: any) {
+      setOutput({ error: e?.message || 'Failed' })
+    }
+    setRunning(false)
+  }
+
+  return (
+    <div>
+      <button className="btn btn-sm" onClick={run} disabled={running} style={{ marginTop: 6 }}>
+        {running ? 'Running...' : '▶ Execute'}
+      </button>
+      {output && (
+        <div className="command-output">{JSON.stringify(output, null, 2)}</div>
+      )}
+    </div>
+  )
+}

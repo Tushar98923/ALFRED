@@ -12,6 +12,9 @@ __pycache__/
 media/
 staticfiles/
 
+# RAG data
+chroma_data/
+
 # Node/Frontend
 node_modules/
 frontend/node_modules/
